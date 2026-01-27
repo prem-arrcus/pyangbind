@@ -1409,7 +1409,20 @@ def find_absolute_default_type(default_type, default_value, elemname):
 
     for i in default_type:
         if not i[1]["base_type"]:
-            test_type = class_map[i[1]["parent_type"]]
+            parent_type = i[1]["parent_type"]
+            if isinstance(parent_type, list):
+                # Union type: parent_type is a list of type names; try each until one accepts the default
+                for pt in parent_type:
+                    try:
+                        test_type = class_map[pt]
+                        test_type["pytype"](default_value)
+                        default_type = test_type
+                        return find_absolute_default_type(default_type, default_value, elemname)
+                    except (ValueError, TypeError, KeyError):
+                        continue
+                continue  # no type in union accepted the default
+            else:
+                test_type = class_map[parent_type]
         else:
             test_type = i[1]
         try:
