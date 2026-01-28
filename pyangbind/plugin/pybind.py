@@ -642,9 +642,25 @@ def build_typedefs(ctx, defnd):
                 elif i[1]["yang_type"] == "identityref":
                     parent_type.append(i[1]["parent_type"])
                 else:
-                    msg = "typedef in a union specified a native type that was not"
-                    msg += " supported (%s in %s)" % (i[1]["yang_type"], item.arg)
-                    raise TypeError(msg)
+                    # Typedef may be in class_map under a different prefix; check by local name
+                    yt = i[1]["yang_type"]
+                    local_yt = yt.split(":")[-1] if ":" in yt else yt
+                    found = None
+                    if yt in class_map:
+                        found = yt
+                    else:
+                        for k in class_map:
+                            if k == local_yt or (
+                                isinstance(k, str) and ":" in k and k.split(":")[-1] == local_yt
+                            ):
+                                found = k
+                                break
+                    if found is not None:
+                        parent_type.append(found)
+                    else:
+                        msg = "typedef in a union specified a native type that was not"
+                        msg += " supported (%s in %s)" % (i[1]["yang_type"], item.arg)
+                        raise TypeError(msg)
 
                 if "default" in i[1] and not default:
                     # When multiple 'default' values are specified within a union that
@@ -1403,13 +1419,30 @@ def build_elemtype(ctx, et, prefix=False):
                         passed = True
                     except Exception:
                         pass
-                if passed is False:
-                    sys.stderr.write("FATAL: unmapped type (%s)\n" % (et.arg))
-                    if DEBUG:
-                        pp.pprint(class_map.keys())
-                        pp.pprint(et.arg)
-                        pp.pprint(prefix)
-                    sys.exit(127)
+                # Typedef may be in class_map under a different prefix (e.g. oc-mpls-types:mpls-label
+                # vs oc-mpls-t:mpls-label); search by local name (part after last colon).
+                if not passed:
+                    local_name = et.arg.split(":")[-1] if ":" in et.arg else et.arg
+                    for k in class_map:
+                        if k == et.arg or k == local_name or (
+                            isinstance(k, str) and ":" in k and k.split(":")[-1] == local_name
+                        ):
+                            elemtype = class_map[k]
+                            passed = True
+                            break
+                if not passed:
+                    # Map unmapped types (e.g. wrong prefix, or never resolved) to string
+                    string_type = {
+                        "native_type": "str",
+                        "parent_type": "string",
+                        "base_type": True,
+                        "quote_arg": True,
+                    }
+                    class_map[et.arg] = string_type
+                    if prefix and ":" not in et.arg:
+                        tmp_name = "%s:%s" % (prefix, et.arg)
+                        class_map[tmp_name] = string_type
+                    elemtype = class_map[tmp_name] if (prefix and ":" not in et.arg) else class_map[et.arg]
         if isinstance(elemtype, list):
             cls = "leaf-union"
         elif "class_override" in elemtype:
