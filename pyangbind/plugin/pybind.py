@@ -1607,6 +1607,8 @@ def get_element(ctx, fd, element, module, parent, path, parent_cfg=True, choice=
         # is str
         tmp_class_map = copy.copy(class_map)
         tmp_class_map["enumeration"] = {"parent_type": "string"}
+        # leafref is a built-in but not in class_map; BFS may hit it via typedef parent_type
+        tmp_class_map["leafref"] = {"parent_type": "string", "base_type": False}
 
         if not default_type:
             if isinstance(elemtype, list):
