@@ -541,7 +541,18 @@ def build_typedefs(ctx, defnd):
                 tn = i.arg
 
             if tn not in known_types:
-                any_unknown = True
+                # Map vendor/extension types (e.g. tailf:*, ianach:*) to string so
+                # typedefs like encrypted-string can be resolved and later lookups succeed.
+                class_map[tn] = {
+                    "native_type": "str",
+                    "parent_type": "string",
+                    "base_type": True,
+                    "quote_arg": True,
+                }
+                known_types.append(tn)
+                if ":" in tn:
+                    known_types.append(tn.split(":")[1])
+                    class_map[tn.split(":")[1]] = class_map[tn]
 
         if not any_unknown:
             process_typedefs_ordered.append((t, defnd[t]))
@@ -574,9 +585,15 @@ def build_typedefs(ctx, defnd):
         known_types.append("leafref")
         known_types.append("bits")
 
-        # Don't allow duplicate definitions of types
+        # Don't allow duplicate definitions of types (unless existing is our string placeholder)
         if type_name in known_types:
-            raise TypeError("Duplicate definition of %s" % type_name)
+            existing = class_map.get(type_name)
+            if not (
+                existing
+                and existing.get("base_type") is True
+                and existing.get("native_type") == "str"
+            ):
+                raise TypeError("Duplicate definition of %s" % type_name)
         default_stmt = item.search_one("default")
 
         # 'elemtype' is a list when the type includes a union, so we need to go
