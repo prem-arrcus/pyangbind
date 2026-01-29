@@ -914,7 +914,12 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), parent_cfg=Tru
             # extension that were provided with the leaf, etc.).
             class_str = {}
             if "default" in i and not i["default"] is None:
-                default_arg = '"%s"' % (i["default"]) if i["quote_arg"] else "%s" % i["default"]
+                if i["quote_arg"]:
+                    # Use repr() so backslashes (e.g. in patterns) are escaped and the
+                    # generated Python code is valid (avoids unicodeescape SyntaxError).
+                    default_arg = repr(i["default"])
+                else:
+                    default_arg = "%s" % i["default"]
 
             if i["class"] == "leaf-list":
                 # Map a leaf-list to the type specified in the class map. This is a
