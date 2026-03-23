@@ -541,7 +541,18 @@ def build_typedefs(ctx, defnd):
                 tn = i.arg
 
             if tn not in known_types:
-                any_unknown = True
+                # Map vendor/extension types (e.g. tailf:*, ianach:*) to string so
+                # typedefs like encrypted-string can be resolved and later lookups succeed.
+                class_map[tn] = {
+                    "native_type": "str",
+                    "parent_type": "string",
+                    "base_type": True,
+                    "quote_arg": True,
+                }
+                known_types.append(tn)
+                if ":" in tn:
+                    known_types.append(tn.split(":")[1])
+                    class_map[tn.split(":")[1]] = class_map[tn]
 
         if not any_unknown:
             process_typedefs_ordered.append((t, defnd[t]))
@@ -574,9 +585,15 @@ def build_typedefs(ctx, defnd):
         known_types.append("leafref")
         known_types.append("bits")
 
-        # Don't allow duplicate definitions of types
+        # Don't allow duplicate definitions of types (unless existing is our string placeholder)
         if type_name in known_types:
-            raise TypeError("Duplicate definition of %s" % type_name)
+            existing = class_map.get(type_name)
+            if not (
+                existing
+                and existing.get("base_type") is True
+                and existing.get("native_type") == "str"
+            ):
+                raise TypeError("Duplicate definition of %s" % type_name)
         default_stmt = item.search_one("default")
 
         # 'elemtype' is a list when the type includes a union, so we need to go
@@ -625,9 +642,25 @@ def build_typedefs(ctx, defnd):
                 elif i[1]["yang_type"] == "identityref":
                     parent_type.append(i[1]["parent_type"])
                 else:
-                    msg = "typedef in a union specified a native type that was not"
-                    msg += " supported (%s in %s)" % (i[1]["yang_type"], item.arg)
-                    raise TypeError(msg)
+                    # Typedef may be in class_map under a different prefix; check by local name
+                    yt = i[1]["yang_type"]
+                    local_yt = yt.split(":")[-1] if ":" in yt else yt
+                    found = None
+                    if yt in class_map:
+                        found = yt
+                    else:
+                        for k in class_map:
+                            if k == local_yt or (
+                                isinstance(k, str) and ":" in k and k.split(":")[-1] == local_yt
+                            ):
+                                found = k
+                                break
+                    if found is not None:
+                        parent_type.append(found)
+                    else:
+                        msg = "typedef in a union specified a native type that was not"
+                        msg += " supported (%s in %s)" % (i[1]["yang_type"], item.arg)
+                        raise TypeError(msg)
 
                 if "default" in i[1] and not default:
                     # When multiple 'default' values are specified within a union that
@@ -881,7 +914,12 @@ def get_children(ctx, fd, i_children, module, parent, path=str(), parent_cfg=Tru
             # extension that were provided with the leaf, etc.).
             class_str = {}
             if "default" in i and not i["default"] is None:
-                default_arg = '"%s"' % (i["default"]) if i["quote_arg"] else "%s" % i["default"]
+                if i["quote_arg"]:
+                    # Use repr() so backslashes (e.g. in patterns) are escaped and the
+                    # generated Python code is valid (avoids unicodeescape SyntaxError).
+                    default_arg = repr(i["default"])
+                else:
+                    default_arg = "%s" % i["default"]
 
             if i["class"] == "leaf-list":
                 # Map a leaf-list to the type specified in the class map. This is a
@@ -1357,7 +1395,7 @@ def build_elemtype(ctx, et, prefix=False):
             for bit in et.search("bit"):
                 position = bit.search_one("position")
                 if position is not None:
-                    pos = position.arg
+                    pos = int(position.arg)
                 else:
                     pos = 1 + max(allowed_bits.values(), default=-1)
                     if pos < 0 or 4294967295 < pos:
@@ -1386,13 +1424,30 @@ def build_elemtype(ctx, et, prefix=False):
                         passed = True
                     except Exception:
                         pass
-                if passed is False:
-                    sys.stderr.write("FATAL: unmapped type (%s)\n" % (et.arg))
-                    if DEBUG:
-                        pp.pprint(class_map.keys())
-                        pp.pprint(et.arg)
-                        pp.pprint(prefix)
-                    sys.exit(127)
+                # Typedef may be in class_map under a different prefix (e.g. oc-mpls-types:mpls-label
+                # vs oc-mpls-t:mpls-label); search by local name (part after last colon).
+                if not passed:
+                    local_name = et.arg.split(":")[-1] if ":" in et.arg else et.arg
+                    for k in class_map:
+                        if k == et.arg or k == local_name or (
+                            isinstance(k, str) and ":" in k and k.split(":")[-1] == local_name
+                        ):
+                            elemtype = class_map[k]
+                            passed = True
+                            break
+                if not passed:
+                    # Map unmapped types (e.g. wrong prefix, or never resolved) to string
+                    string_type = {
+                        "native_type": "str",
+                        "parent_type": "string",
+                        "base_type": True,
+                        "quote_arg": True,
+                    }
+                    class_map[et.arg] = string_type
+                    if prefix and ":" not in et.arg:
+                        tmp_name = "%s:%s" % (prefix, et.arg)
+                        class_map[tmp_name] = string_type
+                    elemtype = class_map[tmp_name] if (prefix and ":" not in et.arg) else class_map[et.arg]
         if isinstance(elemtype, list):
             cls = "leaf-union"
         elif "class_override" in elemtype:
@@ -1409,7 +1464,20 @@ def find_absolute_default_type(default_type, default_value, elemname):
 
     for i in default_type:
         if not i[1]["base_type"]:
-            test_type = class_map[i[1]["parent_type"]]
+            parent_type = i[1]["parent_type"]
+            if isinstance(parent_type, list):
+                # Union type: parent_type is a list of type names; try each until one accepts the default
+                for pt in parent_type:
+                    try:
+                        test_type = class_map[pt]
+                        test_type["pytype"](default_value)
+                        default_type = test_type
+                        return find_absolute_default_type(default_type, default_value, elemname)
+                    except (ValueError, TypeError, KeyError):
+                        continue
+                continue  # no type in union accepted the default
+            else:
+                test_type = class_map[parent_type]
         else:
             test_type = i[1]
         try:
@@ -1594,6 +1662,8 @@ def get_element(ctx, fd, element, module, parent, path, parent_cfg=True, choice=
         # is str
         tmp_class_map = copy.copy(class_map)
         tmp_class_map["enumeration"] = {"parent_type": "string"}
+        # leafref is a built-in but not in class_map; BFS may hit it via typedef parent_type
+        tmp_class_map["leafref"] = {"parent_type": "string", "base_type": False}
 
         if not default_type:
             if isinstance(elemtype, list):

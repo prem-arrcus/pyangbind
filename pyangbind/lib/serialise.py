@@ -511,19 +511,21 @@ class pybindIETFXMLDecoder(object):
 
             elif chobj._yang_type == "list":
                 if not chobj._keyval:
-                    raise NotImplementedError("keyless list?")
-
-                # we just need to find the key value to add it to the list
-                key_parts = []
-                add_kwargs = {}
-                for pkv, ykv in zip(chobj._keyval.split(" "), chobj._yang_keys.split(" ")):
-                    add_kwargs[pkv] = child[ykv]
-                    key_parts.append(str(child[ykv]))
-                key_str = " ".join(map(str, key_parts))
-                if key_str not in chobj:
-                    nobj = chobj.add(**add_kwargs)
+                    # keyless list: add() auto-generates a UUID key and returns it
+                    k = chobj.add()
+                    nobj = chobj[k]
                 else:
-                    nobj = chobj[key_str]
+                    # we just need to find the key value to add it to the list
+                    key_parts = []
+                    add_kwargs = {}
+                    for pkv, ykv in zip(chobj._keyval.split(" "), chobj._yang_keys.split(" ")):
+                        add_kwargs[pkv] = child[ykv]
+                        key_parts.append(str(child[ykv]))
+                    key_str = " ".join(map(str, key_parts))
+                    if key_str not in chobj:
+                        nobj = chobj.add(**add_kwargs)
+                    else:
+                        nobj = chobj[key_str]
 
                 # now we have created the nested object element, we add other members
                 pybindIETFXMLDecoder.load_xml(
